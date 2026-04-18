@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "Employee": {
+      "title": "Employee",
+      "description": "Personnel data in SMP Negeri 248 Jakarta",
+      "type": "object",
+      "properties": {
+        "nip": { "type": "string", "description": "Unique NIP or NUPTK" },
+        "name": { "type": "string", "description": "Full name" },
+        "jabatan": { "type": "string", "description": "Job title" },
+        "unit": { "type": "string", "description": "Work unit" },
+        "type": { "type": "string", "enum": ["KKI", "PPPK"], "description": "Contract type" },
+        "active": { "type": "boolean", "description": "Employment status" },
+        "registeredAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["nip", "name", "jabatan", "unit", "type", "active"]
+    },
+    "AttendanceRecord": {
+      "title": "Attendance Record",
+      "description": "Biometric check-in/out logs",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "description": "Reference to employee NIP" },
+        "employeeName": { "type": "string", "description": "Cached name for display" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "action": { "type": "string", "description": "e.g., Fingerprint IN, Fingerprint OUT" },
+        "ip": { "type": "string", "description": "IP of the device" },
+        "status": { "type": "string", "enum": ["Success", "Error"] },
+        "scannerId": { "type": "string" }
+      },
+      "required": ["employeeId", "timestamp", "action", "status"]
+    },
+    "PerformanceActivity": {
+      "title": "Performance Activity",
+      "description": "Daily work activity reports (E-Kinerja)",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "description": "Author UID or NIP" },
+        "employeeName": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "activityName": { "type": "string" },
+        "qty": { "type": "number" },
+        "unit": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["Pending", "Verified", "Rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["employeeId", "date", "activityName", "qty", "unit", "status"]
+    },
+    "SystemUser": {
+      "title": "System User",
+      "description": "Application user account with specific roles",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["Super Admin", "Operator", "Karyawan", "Monitor"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/employees/{nip}": {
+      "schema": "Employee",
+      "description": "Staff database"
+    },
+    "/attendance/{recordId}": {
+      "schema": "AttendanceRecord",
+      "description": "Global attendance logging"
+    },
+    "/performance/{activityId}": {
+      "schema": "PerformanceActivity",
+      "description": "E-Kinerja submissions"
+    },
+    "/systemUsers/{uid}": {
+      "schema": "SystemUser",
+      "description": "Internal access control list"
+    }
+  }
+}

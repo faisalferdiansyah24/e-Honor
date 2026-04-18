@@ -1,0 +1,97 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/systemUsers/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && getUserData().role == 'Super Admin';
+    }
+
+    function isOperator() {
+      return isSignedIn() && (getUserData().role == 'Super Admin' || getUserData().role == 'Operator');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // System Users
+    match /systemUsers/{uid} {
+      allow read: if isSignedIn() && (isOwner(uid) || isAdmin());
+      allow create: if isSignedIn() && isOwner(uid) && request.resource.data.role == 'Karyawan';
+      allow update: if isSignedIn() && isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Employees
+    match /employees/{nip} {
+      function isValidEmployee(data) {
+        return data.keys().hasAll(['nip', 'name', 'jabatan', 'unit', 'type', 'active']) &&
+               data.nip is string && data.nip.size() <= 64 &&
+               data.name is string && data.name.size() <= 200 &&
+               data.jabatan is string &&
+               data.unit is string &&
+               data.type in ['KKI', 'PPPK'] &&
+               data.active is bool;
+      }
+
+      allow read: if isSignedIn() && (isOperator() || isAdmin());
+      allow create, update: if isAdmin() && isValidEmployee(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // Attendance
+    match /attendance/{recordId} {
+      allow read: if isSignedIn() && (isOperator() || isAdmin());
+      // Usually attendance is created by a hardware service or the system, 
+      // but if the app does it (mocking biometric), it's restricted.
+      allow create: if isSignedIn() && isOperator();
+      allow update, delete: if isAdmin();
+    }
+
+    // Performance
+    match /performance/{activityId} {
+      function isValidActivity(data) {
+        return data.keys().hasAll(['employeeId', 'date', 'activityName', 'qty', 'unit', 'status']) &&
+               data.employeeId is string &&
+               data.activityName is string && data.activityName.size() <= 500 &&
+               data.qty is number &&
+               data.status in ['Pending', 'Verified', 'Rejected'];
+      }
+
+      allow read: if isSignedIn() && (isAdmin() || isOperator() || resource.data.employeeId == request.auth.uid);
+      
+      allow create: if isSignedIn() && 
+                    request.resource.data.employeeId == request.auth.uid &&
+                    request.resource.data.status == 'Pending' &&
+                    isValidActivity(request.resource.data);
+
+      allow update: if isSignedIn() && (
+        // Admin validating
+        (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
+        // User editing their own while pending
+        (resource.data.employeeId == request.auth.uid && resource.data.status == 'Pending' && isValidActivity(request.resource.data))
+      );
+
+      allow delete: if isAdmin() || (resource.data.employeeId == request.auth.uid && resource.data.status == 'Pending');
+    }
+  }
+}

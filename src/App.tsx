@@ -7,6 +7,16 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
+import { db, auth } from "./lib/firebase";
+import { 
+  collection, query, orderBy, onSnapshot, doc, getDoc, setDoc, addDoc, 
+  updateDoc, deleteDoc, serverTimestamp, where, getDocs 
+} from "firebase/firestore";
+import { 
+  signInWithEmailAndPassword, onAuthStateChanged, signOut, 
+  createUserWithEmailAndPassword 
+} from "firebase/auth";
+
 // Mock CAPTCHA generation
 const generateCaptcha = () => {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -28,37 +38,61 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [userRole, setUserRole] = useState("Karyawan");
+  const [user, setUser] = useState<any>(null);
 
-  const handleLogin = (e: React.FormEvent) => {
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        setUser(firebaseUser);
+        // Fetch user role from Firestore
+        const userDoc = await getDoc(doc(db, "systemUsers", firebaseUser.uid));
+        if (userDoc.exists()) {
+          setUserRole(userDoc.data().role);
+        } else {
+          // Default role if not found
+          setUserRole("Karyawan");
+        }
+        setView("dashboard");
+      } else {
+        setUser(null);
+        setView("login");
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
 
-    // Simulate API call
-    setTimeout(() => {
-      const isCaptchaCorrect = securityCode.toUpperCase() === captcha.toUpperCase();
-      
-      if (isCaptchaCorrect) {
-        if (username === "admin" && password === "admin") {
-          setUserRole("Super Admin");
-          setView("dashboard");
-        } else if (username === "karyawan" && password === "karyawan") {
-          setUserRole("Karyawan");
-          setView("dashboard");
-        } else if (username && password) {
-          // Defaulting to Operator for other credentials for prototype flexibility
-          setUserRole("Operator");
-          setView("dashboard");
-        } else {
-          setError("Username atau password salah.");
-        }
-      } else {
-        setError("Kode keamanan tidak sesuai.");
-        setCaptcha(generateCaptcha());
-        setSecurityCode("");
-      }
+    const isCaptchaCorrect = securityCode.toUpperCase() === captcha.toUpperCase();
+    if (!isCaptchaCorrect) {
+      setError("Kode keamanan tidak sesuai.");
+      setCaptcha(generateCaptcha());
+      setSecurityCode("");
       setIsLoading(false);
-    }, 1500);
+      return;
+    }
+
+    try {
+      // Check for e-Honor legacy style login vs email
+      const email = username.includes("@") ? username : `${username}@ehonor.dki.go.id`;
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (err: any) {
+      console.error(err);
+      setError("Email/Username atau password salah.");
+      setIsLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setView("login");
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const refreshCaptcha = () => {
@@ -66,8 +100,8 @@ export default function App() {
     setSecurityCode("");
   };
 
-  if (view === "dashboard") {
-    return <Dashboard onLogout={() => setView("login")} username={username} role={userRole} />;
+  if (view === "dashboard" && user) {
+    return <Dashboard onLogout={handleLogout} username={user.displayName || user.email?.split('@')[0]} role={userRole} userId={user.uid} />;
   }
 
   return (
@@ -131,13 +165,60 @@ export default function App() {
   );
 }
 
-function Dashboard({ onLogout, username, role }: { onLogout: () => void, username: string, role: string }) {
+function Dashboard({ onLogout, username, role, userId }: { onLogout: () => void, username: string, role: string, userId: string }) {
   const [now, setNow] = useState(new Date());
   const [activeTab, setActiveTab] = useState<TabType>(role === "Karyawan" ? "performance" : "dashboard");
   const [attendanceStatus, setAttendanceStatus] = useState<"not_yet" | "success">("not_yet");
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string, type: 'success' | 'info' | 'error' } | null>(null);
+
+  // Firestore States
+  const [employees, setEmployees] = useState<any[]>([]);
+  const [attendanceLogs, setAttendanceLogs] = useState<any[]>([]);
+  const [performanceData, setPerformanceData] = useState<any[]>([]);
+  const [systemUsers, setSystemUsers] = useState<any[]>([]);
+
+  useEffect(() => {
+    // Real-time Employees
+    const qEmployees = query(collection(db, "employees"), orderBy("name", "asc"));
+    const unsubEmployees = onSnapshot(qEmployees, (snapshot) => {
+      setEmployees(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+
+    // Real-time Attendance
+    const qAttendance = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
+    const unsubAttendance = onSnapshot(qAttendance, (snapshot) => {
+      setAttendanceLogs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+
+    // Real-time Performance (Role-based)
+    let qPerformance;
+    if (role === "Karyawan") {
+      qPerformance = query(collection(db, "performance"), where("employeeId", "==", userId), orderBy("date", "desc"));
+    } else {
+      qPerformance = query(collection(db, "performance"), orderBy("status", "desc"), orderBy("date", "desc"));
+    }
+    const unsubPerformance = onSnapshot(qPerformance, (snapshot) => {
+      setPerformanceData(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+
+    // Real-time System Users (Admin only)
+    let unsubUsers = () => {};
+    if (role === "Super Admin") {
+      const qUsers = query(collection(db, "systemUsers"), orderBy("role", "asc"));
+      unsubUsers = onSnapshot(qUsers, (snapshot) => {
+        setSystemUsers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      });
+    }
+
+    return () => {
+      unsubEmployees();
+      unsubAttendance();
+      unsubPerformance();
+      unsubUsers();
+    };
+  }, [role, userId]);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
@@ -155,40 +236,64 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
     setToast({ message, type });
   };
 
-  const handleClockIn = () => {
+  const handleClockIn = async () => {
     setIsLoading(true);
-    setTimeout(() => {
+    try {
+      await addDoc(collection(db, "attendance"), {
+        employeeId: userId,
+        employeeName: username,
+        timestamp: serverTimestamp(),
+        action: "Fingerprint IN",
+        ip: "10.224.12.88",
+        status: "Success",
+        scannerId: "DKI-SCAN-042-PRO"
+      });
       setAttendanceStatus("success");
-      setIsLoading(false);
       notify("Absensi Masuk Berhasil dicatat", "success");
-    }, 1500);
+    } catch (err) {
+      console.error(err);
+      notify("Gagal mencatat absensi", "error");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleExport = (format: string) => {
+  const handleValidation = async (id: string, action: 'approve' | 'reject') => {
+    const status = action === 'approve' ? 'Verified' : 'Rejected';
+    try {
+      await updateDoc(doc(db, "performance", id), { status });
+      notify(`Laporan ${action === 'approve' ? 'Disetujui' : 'Ditolak'}`, action === 'approve' ? 'success' : 'error');
+    } catch (err) {
+      console.error(err);
+      notify("Gagal memperbarui status", "error");
+    }
+  };
+
+  const handleExport = (format: 'PDF' | 'EXCEL') => {
     setIsLoading(true);
-    notify(`Menyiapkan data laporan ${format}...`, 'info');
+    notify(`Generating ${format} report...`, "info");
     setTimeout(() => {
       setIsLoading(false);
-      notify(`Laporan ${format} berhasil diunduh`, 'success');
+      notify(`${format} Report: April_2026_${username}.zip has been downloaded`, "success");
     }, 2000);
   };
 
   const handleTestConnection = () => {
     setIsLoading(true);
-    notify("Menguji koneksi ke scanner...", 'info');
+    notify("Pinging hardware terminal DKI-SCAN-042-PRO...", "info");
     setTimeout(() => {
       setIsLoading(false);
-      notify("Koneksi Scanner Fingerprint Stabil (Response: 12ms)", 'success');
+      notify("Hardware link stable. Latency: 42ms", "success");
     }, 1500);
   };
 
   const handleUpdateSettings = () => {
     setIsLoading(true);
-    notify("Menyimpan konfigurasi...", 'info');
+    notify("Pushing configuration to hardware...", "info");
     setTimeout(() => {
       setIsLoading(false);
-      notify("Konfigurasi Perangkat berhasil diperbarui", 'success');
-    }, 1200);
+      notify("Configuration synced successfully", "success");
+    }, 2000);
   };
 
   const renderContent = () => {
@@ -221,10 +326,20 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                      <AttendanceRow time="10:42:01" name="Ahmad Dani" dept="IT Support" scanner="ENT-01" status="Hadir" color="success" />
-                      <AttendanceRow time="10:38:45" name="Siti Pertiwi" dept="Accounting" scanner="ENT-02" status="Hadir" color="success" />
-                      <AttendanceRow time="10:15:20" name="Ridwan Kamil" dept="Logistics" scanner="ENT-01" status="Late" color="warning" />
-                      <AttendanceRow time="09:55:12" name="Budi Martono" dept="Marketing" scanner="ENT-01" status="Hadir" color="success" />
+                      {attendanceLogs.slice(0, 10).map((log, i) => (
+                        <AttendanceRow 
+                          key={log.id || i}
+                          time={log.timestamp?.toDate ? log.timestamp.toDate().toLocaleTimeString('id-id') : "..."} 
+                          name={log.employeeName} 
+                          dept="Unit Kerja" 
+                          scanner={log.scannerId} 
+                          status={log.status === "Success" ? "Hadir" : "Error"} 
+                          color={log.status === "Success" ? "success" : "warning"} 
+                        />
+                      ))}
+                      {attendanceLogs.length === 0 && (
+                        <tr><td colSpan={4} className="py-20 text-center text-[10px] font-bold text-text-muted uppercase">Belum ada data absensi</td></tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -280,10 +395,20 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                       </tr>
                    </thead>
                    <tbody className="divide-y divide-border">
-                      <EmployeeRow nip="19920101202301" name="Faisal Ferdiansyah" jabatan="Guru Madrasah" type="KKI" unit="SMPN 12 Jakarta" active />
-                      <EmployeeRow nip="19880512202202" name="Budi Darmawan" jabatan="Tenaga Administrasi" type="PPPK" unit="Disdik DKI" active />
-                      <EmployeeRow nip="19950310202303" name="Siti Aminah" jabatan="Operator Dapodik" type="KKI" unit="SDN 01 Palmerah" active={false} />
-                      <EmployeeRow nip="19901122202401" name="Andi Setiawan" jabatan="Keamanan Sekolah" type="PPPK" unit="SMAN 70 Jakarta" active />
+                      {employees.map((emp, i) => (
+                        <EmployeeRow 
+                           key={emp.id || i}
+                           nip={emp.nip} 
+                           name={emp.name} 
+                           jabatan={emp.jabatan} 
+                           type={emp.type} 
+                           unit={emp.unit} 
+                           active={emp.active} 
+                        />
+                      ))}
+                      {employees.length === 0 && (
+                        <tr><td colSpan={5} className="py-20 text-center text-[10px] font-black text-text-muted uppercase tracking-widest leading-relaxed">Database Pegawai Kosong<br/><span className="text-[10px] opacity-40">Mohon Tunggu...</span></td></tr>
+                      )}
                    </tbody>
                 </table>
              </div>
@@ -392,10 +517,9 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                                </tr>
                             </thead>
                             <tbody className="divide-y divide-border">
-                               <SystemUserRow name="Budi Administrator" email="budi.admin@jakarta.go.id" role="Super Admin" active />
-                               <SystemUserRow name="Siti Operator" email="siti.op@jakarta.go.id" role="Operator" active />
-                               <SystemUserRow name="Andi Karyawan" email="andi.kar@jakarta.go.id" role="Karyawan" active />
-                               <SystemUserRow name="Rian Monitoring" email="rian.mon@jakarta.go.id" role="Monitor" active={false} />
+                               {systemUsers.map((u, i) => (
+                                 <SystemUserRow key={u.id || i} name={u.displayName || u.email?.split('@')[0]} email={u.email} role={u.role} active />
+                               ))}
                             </tbody>
                          </table>
                       </div>
@@ -435,23 +559,44 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                       <div className="w-12 h-12 bg-accent/10 rounded-full flex items-center justify-center text-accent"><Zap size={24} /></div>
                       <h3 className="text-sm font-bold text-sidebar-bg uppercase tracking-widest">Input Aktivitas</h3>
                    </div>
-                   <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); notify("Kinerja berhasil disimpan", "success"); }}>
+                   <form className="space-y-5" onSubmit={async (e) => { 
+                      e.preventDefault(); 
+                      const form = e.target as HTMLFormElement;
+                      const data = {
+                        employeeId: userId,
+                        employeeName: username,
+                        date: (form.elements.namedItem('date') as HTMLInputElement).value,
+                        activityName: (form.elements.namedItem('activity') as HTMLInputElement).value,
+                        qty: Number((form.elements.namedItem('qty') as HTMLInputElement).value),
+                        unit: (form.elements.namedItem('unit') as HTMLSelectElement).value,
+                        description: (form.elements.namedItem('desc') as HTMLTextAreaElement).value,
+                        status: 'Pending',
+                        createdAt: serverTimestamp()
+                      };
+                      try {
+                        await addDoc(collection(db, "performance"), data);
+                        form.reset();
+                        notify("Kinerja berhasil dikirim untuk verifikasi", "success");
+                      } catch (err) {
+                        notify("Gagal mengirim laporan", "error");
+                      }
+                   }}>
                       <div className="space-y-1.5 leading-none">
                          <label className="text-[10px] font-black text-text-muted uppercase tracking-widest">Tanggal Kegiatan</label>
-                         <input type="date" className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm" defaultValue={new Date().toISOString().split('T')[0]} />
+                         <input type="date" name="date" className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm" defaultValue={new Date().toISOString().split('T')[0]} />
                       </div>
                       <div className="space-y-1.5 leading-none">
                          <label className="text-[10px] font-black text-text-muted uppercase tracking-widest">Nama Aktivitas</label>
-                         <input type="text" className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: Menyusun Laporan Bulanan" />
+                         <input type="text" name="activity" required className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: Menyusun Laporan Bulanan" />
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                          <div className="space-y-1.5 leading-none">
                             <label className="text-[10px] font-black text-text-muted uppercase tracking-widest">Volume/Qty</label>
-                            <input type="number" className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm" placeholder="0" />
+                            <input type="number" name="qty" required className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm" placeholder="0" />
                          </div>
                          <div className="space-y-1.5 leading-none">
                             <label className="text-[10px] font-black text-text-muted uppercase tracking-widest">Satuan</label>
-                            <select className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm outline-none">
+                            <select name="unit" className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm outline-none">
                                <option>Laporan</option>
                                <option>Berkas</option>
                                <option>Kegiatan</option>
@@ -461,7 +606,7 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                       </div>
                       <div className="space-y-1.5 leading-none">
                          <label className="text-[10px] font-black text-text-muted uppercase tracking-widest">Keterangan / Deskripsi</label>
-                         <textarea rows={4} className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm resize-none" placeholder="Detail aktivitas yang dikerjakan..."></textarea>
+                         <textarea name="desc" rows={4} className="w-full px-4 py-3 bg-bg border border-border rounded-lg text-sm resize-none" placeholder="Detail aktivitas yang dikerjakan..."></textarea>
                       </div>
                       <button type="submit" className="w-full py-3 bg-accent text-white rounded-lg text-xs font-black uppercase tracking-widest shadow-lg shadow-accent/20 hover:bg-blue-600 active:scale-95 transition-all">Submit Kinerja</button>
                    </form>
@@ -486,10 +631,18 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                           </tr>
                        </thead>
                        <tbody className="divide-y divide-border">
-                          <PerformanceRow date="18 Apr 2026" activity="Entri Data Pegawai KKI Baru" qty="5 Berkas" status="Verified" />
-                          <PerformanceRow date="17 Apr 2026" activity="Maintenance Fingerprint Scanner #042" qty="1 Kegiatan" status="Verified" />
-                          <PerformanceRow date="16 Apr 2026" activity="Penyusunan Laporan Kehadiran Mingguan" qty="1 Laporan" status="Pending" />
-                          <PerformanceRow date="15 Apr 2026" activity="Koordinasi Teknis Disdik DKI" qty="2 Jam" status="Verified" />
+                          {performanceData.map((perf, i) => (
+                             <PerformanceRow 
+                                key={perf.id || i}
+                                date={perf.date} 
+                                activity={perf.activityName} 
+                                qty={`${perf.qty} ${perf.unit}`} 
+                                status={perf.status} 
+                             />
+                          ))}
+                          {performanceData.length === 0 && (
+                            <tr><td colSpan={4} className="py-20 text-center text-[10px] font-black text-text-muted uppercase tracking-widest">Belum ada riwayat kinerja</td></tr>
+                          )}
                        </tbody>
                     </table>
                  </div>
@@ -521,9 +674,21 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
                         </tr>
                      </thead>
                      <tbody className="divide-y divide-border">
-                        <ValidationRow name="Andi Karyawan" nip="19920812..." date="18 Apr 2026" activity="Entri Data Pegawai KKI Baru" qty="5 Berkas" status="Pending" onAction={(type) => notify(`Laporan ${type === 'approve' ? 'Disetujui' : 'Ditolak'}`, type === 'approve' ? 'success' : 'error')} />
-                        <ValidationRow name="Siti Operator" nip="19880125..." date="17 Apr 2026" activity="Maintenance Fingerprint Scanner #042" qty="1 Kegiatan" status="Verified" onAction={() => {}} />
-                        <ValidationRow name="Budi Admin" nip="19850410..." date="16 Apr 2026" activity="Penyusunan Laporan Kehadiran Mingguan" qty="1 Laporan" status="Verified" onAction={() => {}} />
+                        {performanceData.map((perf, i) => (
+                           <ValidationRow 
+                              key={perf.id || i}
+                              name={perf.employeeName || "Karyawan"} 
+                              nip={perf.employeeId?.substring(0, 8) || "..."} 
+                              date={perf.date} 
+                              activity={perf.activityName} 
+                              qty={`${perf.qty} ${perf.unit}`} 
+                              status={perf.status} 
+                              onAction={(action) => handleValidation(perf.id, action)} 
+                           />
+                        ))}
+                        {performanceData.length === 0 && (
+                           <tr><td colSpan={4} className="py-20 text-center text-[10px] font-bold text-text-muted uppercase">Tidak ada laporan masuk</td></tr>
+                        )}
                      </tbody>
                   </table>
                </div>
@@ -590,7 +755,7 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
         <AnimatePresence>
            {isModalOpen === 'add_employee' && <AddEmployeeModal onClose={() => setIsModalOpen(null)} onSave={() => { setIsModalOpen(null); notify("Pegawai baru berhasil didaftarkan", "success"); }} />}
            {isModalOpen === 'add_user' && <AddUserModal onClose={() => setIsModalOpen(null)} onSave={() => { setIsModalOpen(null); notify("User sistem baru berhasil ditambahkan", "success"); }} />}
-           {isModalOpen === 'audit_log' && <AuditLogModal onClose={() => setIsModalOpen(null)} />}
+           {isModalOpen === 'audit_log' && <AuditLogModal logs={attendanceLogs} onClose={() => setIsModalOpen(null)} />}
         </AnimatePresence>
       </div>
     </div>
@@ -598,6 +763,34 @@ function Dashboard({ onLogout, username, role }: { onLogout: () => void, usernam
 }
 
 function AddUserModal({ onClose, onSave }: { onClose: () => void, onSave: () => void }) {
+  const [formData, setFormData] = useState({ name: '', email: '', role: 'Karyawan', password: 'password123' });
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    setLoading(true);
+    try {
+      // Create user in Firebase Auth
+      const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+      const user = userCredential.user;
+      
+      // Store additional profile in Firestore
+      await setDoc(doc(db, "systemUsers", user.uid), {
+        uid: user.uid,
+        displayName: formData.name,
+        email: formData.email,
+        role: formData.role,
+        createdAt: serverTimestamp()
+      });
+      
+      onSave();
+    } catch (err: any) {
+      console.error(err);
+      alert("Gagal menambahkan user: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-sidebar-bg/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
       <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} className="bg-white w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden border border-border">
@@ -608,15 +801,15 @@ function AddUserModal({ onClose, onSave }: { onClose: () => void, onSave: () => 
         <div className="p-8 space-y-4">
            <div className="space-y-1.5">
               <label className="text-[10px] font-black uppercase text-text-muted">Nama Pengguna</label>
-              <input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: Admin Server" />
+              <input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: Admin Server" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
            </div>
            <div className="space-y-1.5">
               <label className="text-[10px] font-black uppercase text-text-muted">Email / Username</label>
-              <input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="admin@dki.go.id" />
+              <input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="admin@dki.go.id" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} />
            </div>
            <div className="space-y-1.5">
               <label className="text-[10px] font-black uppercase text-text-muted">Role / Hak Akses</label>
-              <select className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm outline-none focus:ring-1 focus:ring-accent">
+              <select className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm outline-none focus:ring-1 focus:ring-accent" value={formData.role} onChange={e => setFormData({...formData, role: e.target.value})}>
                  <option>Karyawan</option>
                  <option>Super Administrator</option>
                  <option>Operator Unit Sekolah</option>
@@ -626,12 +819,14 @@ function AddUserModal({ onClose, onSave }: { onClose: () => void, onSave: () => 
            </div>
            <div className="p-4 bg-bg rounded-xl border border-border flex items-start gap-4">
               <ShieldCheck size={20} className="text-success shrink-0" />
-              <p className="text-[10px] text-text-muted font-medium leading-relaxed uppercase">User akan mendapatkan hak akses sesuai dengan Role yang dipilih. Pastikan data sudah benar.</p>
+              <p className="text-[10px] text-text-muted font-medium leading-relaxed uppercase">User baru akan otomatis terdaftar dengan email dan role yang ditentukan. Password default adalah: password123</p>
            </div>
         </div>
         <div className="px-8 py-6 bg-bg flex justify-end gap-3 border-t border-border">
            <button onClick={onClose} className="px-6 py-2.5 text-[10px] font-bold uppercase text-text-muted hover:text-danger">Batal</button>
-           <button onClick={onSave} className="px-8 py-2.5 bg-accent text-white rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-accent/20">Daftarkan User</button>
+           <button onClick={handleSubmit} disabled={loading} className="px-8 py-2.5 bg-accent text-white rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-accent/20">
+             {loading ? "Memproses..." : "Daftarkan User"}
+           </button>
         </div>
       </motion.div>
     </motion.div>
@@ -639,6 +834,26 @@ function AddUserModal({ onClose, onSave }: { onClose: () => void, onSave: () => 
 }
 
 function AddEmployeeModal({ onClose, onSave }: { onClose: () => void, onSave: () => void }) {
+  const [formData, setFormData] = useState({ nip: '', name: '', jabatan: '', unit: '', type: 'KKI' });
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    setLoading(true);
+    try {
+      await setDoc(doc(db, "employees", formData.nip), {
+        ...formData,
+        active: true,
+        registeredAt: serverTimestamp()
+      });
+      onSave();
+    } catch (err) {
+      console.error(err);
+      alert("Gagal menyimpan data pegawai");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-sidebar-bg/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
       <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} className="bg-white w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden border border-border">
@@ -648,40 +863,38 @@ function AddEmployeeModal({ onClose, onSave }: { onClose: () => void, onSave: ()
         </div>
         <div className="p-8 space-y-4">
            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">NIP / NUPTK</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: 1992..." /></div>
-              <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">Nama Lengkap</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Masukkan nama..." /></div>
+              <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">NIP / NUPTK</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: 1992..." value={formData.nip} onChange={e => setFormData({...formData, nip: e.target.value})} /></div>
+              <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">Nama Lengkap</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Masukkan nama..." value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} /></div>
            </div>
-           <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">Jabatan</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: Staff IT" /></div>
-           <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">Unit Kerja</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: SMPN 12 Jakarta" /></div>
-           <div className="bg-bg p-6 rounded-xl border border-dashed border-border text-center">
-              <Fingerprint size={32} className="mx-auto text-text-muted mb-2" />
-              <p className="text-[10px] text-text-muted font-bold uppercase">Menunggu Registrasi Biometrik...</p>
-              <button className="mt-4 px-4 py-2 bg-sidebar-bg text-white rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-black transition-colors">Start Scan</button>
+           <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">Jabatan</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: Staff IT" value={formData.jabatan} onChange={e => setFormData({...formData, jabatan: e.target.value})} /></div>
+           <div className="space-y-1.5"><label className="text-[10px] font-black uppercase text-text-muted">Unit Kerja</label><input type="text" className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm" placeholder="Contoh: SMPN 12 Jakarta" value={formData.unit} onChange={e => setFormData({...formData, unit: e.target.value})} /></div>
+           <div className="space-y-1.5">
+              <label className="text-[10px] font-black uppercase text-text-muted">Tipe Kontrak</label>
+              <select className="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-sm outline-none" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}>
+                <option>KKI</option>
+                <option>PPPK</option>
+              </select>
            </div>
         </div>
         <div className="px-8 py-6 bg-bg flex justify-end gap-3 border-t border-border">
            <button onClick={onClose} className="px-6 py-2.5 text-[10px] font-bold uppercase text-text-muted hover:text-danger">Batal</button>
-           <button onClick={onSave} className="px-8 py-2.5 bg-accent text-white rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-accent/20">Simpan Data Pegawai</button>
+           <button onClick={handleSubmit} disabled={loading} className="px-8 py-2.5 bg-accent text-white rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-lg shadow-accent/20">
+             {loading ? "Menyimpan..." : "Simpan Data Pegawai"}
+           </button>
         </div>
       </motion.div>
     </motion.div>
   );
 }
 
-function AuditLogModal({ onClose }: { onClose: () => void }) {
-  const logs = [
-    { time: '10:45:12', user: 'Admin Faisal', action: 'Update Config Scanner #042', status: 'Success', ip: '10.224.12.80' },
-    { time: '10:30:05', user: 'System', action: 'Biometric DB Backup', status: 'Success', ip: 'Local' },
-    { time: '09:12:44', user: 'Unknown', action: 'Failed Login Attempt', status: 'Blocked', ip: '182.1.22.4' },
-    { time: '08:00:00', user: 'System', action: 'Daily Auto-Sync Started', status: 'Success', ip: 'ENT-B' },
-  ];
+function AuditLogModal({ onClose, logs }: { onClose: () => void, logs: any[] }) {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-sidebar-bg/70 backdrop-blur-md z-[200] flex items-center justify-center p-4 font-sans text-sidebar-bg">
        <motion.div initial={{ scale: 0.95, y: 30 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 30 }} className="bg-white w-full max-w-4xl max-h-[80vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col">
           <div className="px-10 py-8 border-b border-border flex items-center justify-between">
              <div className="flex items-center gap-4">
                 <div className="w-12 h-12 bg-danger/10 text-danger rounded-2xl flex items-center justify-center"><ShieldAlert size={28} /></div>
-                <div><h3 className="text-lg font-black tracking-tight uppercase">Audit Log Keamanan</h3><p className="text-xs font-bold text-text-muted uppercase tracking-widest">Aktivitas Sistem 24 Jam Terakhir</p></div>
+                <div><h3 className="text-lg font-black tracking-tight uppercase">Audit Log Keamanan</h3><p className="text-xs font-bold text-text-muted uppercase tracking-widest">Aktivitas Sistem Real-time</p></div>
              </div>
              <button onClick={onClose} className="p-3 bg-bg hover:bg-danger/10 hover:text-danger rounded-full transition-all"><X size={24} /></button>
           </div>
@@ -692,14 +905,17 @@ function AuditLogModal({ onClose }: { onClose: () => void }) {
                 </thead>
                 <tbody className="divide-y divide-border">
                    {logs.map((log, i) => (
-                     <tr key={i} className="hover:bg-bg/50 transition-colors">
-                        <td className="py-5 font-mono text-xs font-bold">{log.time}</td>
-                        <td className="py-5 font-bold text-xs">{log.user}</td>
-                        <td className="py-5 text-xs font-medium">{log.action}</td>
-                        <td className="py-5 font-mono text-xs text-text-muted">{log.ip}</td>
+                     <tr key={log.id || i} className="hover:bg-bg/50 transition-colors">
+                        <td className="py-5 font-mono text-xs font-bold">{log.timestamp?.toDate ? log.timestamp.toDate().toLocaleTimeString('id-id') : '...'}</td>
+                        <td className="py-5 font-bold text-xs">{log.employeeName || 'System'}</td>
+                        <td className="py-5 text-xs font-medium">{log.action || 'Fingerprint Scan'}</td>
+                        <td className="py-5 font-mono text-xs text-text-muted">{log.ip || '10.224.12.88'}</td>
                         <td className="py-5 text-center"><span className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest ${log.status === 'Success' ? 'bg-success text-white' : 'bg-danger text-white'}`}>{log.status}</span></td>
                      </tr>
                    ))}
+                   {logs.length === 0 && (
+                     <tr><td colSpan={5} className="py-20 text-center text-xs font-black text-text-muted uppercase tracking-widest">No logs available at this time</td></tr>
+                   )}
                 </tbody>
              </table>
           </div>
@@ -718,7 +934,7 @@ function NavItem({ icon, label, active = false, onClick }: { icon: React.ReactNo
   );
 }
 
-function EmployeeRow({ nip, name, jabatan, unit, type, active }: { nip: string, name: string, jabatan: string, unit: string, type: string, active: boolean }) {
+function EmployeeRow({ nip, name, jabatan, unit, type, active }: { nip: string, name: string, jabatan: string, unit: string, type: string, active: boolean, key?: any }) {
   return (
     <tr className="hover:bg-bg/50 transition-colors">
       <td className="px-8 py-4"><div className="flex items-center gap-3"><div className="w-8 h-8 bg-bg rounded-lg flex items-center justify-center border border-border"><User size={14} /></div><div><p className="text-xs font-bold text-sidebar-bg">{name}</p><p className="text-[10px] font-mono text-text-muted">{nip}</p></div></div></td>
@@ -767,7 +983,7 @@ function ReportRow({ name, nip, hadir, izin, sakit, lambat, effective }: { name:
   );
 }
 
-function PerformanceRow({ date, activity, qty, status }: { date: string, activity: string, qty: string, status: string }) {
+function PerformanceRow({ date, activity, qty, status }: { date: string, activity: string, qty: string, status: string, key?: any }) {
   return (
     <tr className="hover:bg-bg/50 transition-colors">
        <td className="px-8 py-4 text-[10px] font-bold text-text-muted uppercase tracking-widest">{date}</td>
@@ -782,7 +998,7 @@ function PerformanceRow({ date, activity, qty, status }: { date: string, activit
   );
 }
 
-function ValidationRow({ name, nip, date, activity, qty, status, onAction }: { name: string, nip: string, date: string, activity: string, qty: string, status: string, onAction: (type: 'approve' | 'reject') => void }) {
+function ValidationRow({ name, nip, date, activity, qty, status, onAction }: { name: string, nip: string, date: string, activity: string, qty: string, status: string, onAction: (type: 'approve' | 'reject') => void, key?: any }) {
   return (
     <tr className="hover:bg-bg transition-colors">
        <td className="px-8 py-4">
@@ -826,7 +1042,7 @@ function RoleCard({ name, desc }: { name: string, desc: string }) {
   );
 }
 
-function SystemUserRow({ name, email, role, active }: { name: string, email: string, role: string, active: boolean }) {
+function SystemUserRow({ name, email, role, active }: { name: string, email: string, role: string, active: boolean, key?: any }) {
   return (
     <tr className="hover:bg-bg transition-colors">
        <td className="px-6 py-4">
@@ -863,7 +1079,7 @@ function SecurityToggle({ label, active }: { label: string, active: boolean }) {
   );
 }
 
-function AttendanceRow({ time, name, dept, scanner, status, color }: { time: string, name: string, dept: string, scanner: string, status: string, color: 'success' | 'warning' }) {
+function AttendanceRow({ time, name, dept, scanner, status, color }: { time: string, name: string, dept: string, scanner: string, status: string, color: 'success' | 'warning', key?: any }) {
   const badgeMap = { success: "bg-success/10 text-success", warning: "bg-warning/10 text-warning" };
   return (
     <tr className="hover:bg-bg/50 transition-colors">
