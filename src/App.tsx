@@ -44,10 +44,25 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         setUser(firebaseUser);
-        // Fetch user role from Firestore
-        const userDoc = await getDoc(doc(db, "systemUsers", firebaseUser.uid));
-        if (userDoc.exists()) {
-          setUserRole(userDoc.data().role);
+        // Fetch user role from Firestore with a short retry for bootstrap race conditions
+        const userDocRef = doc(db, "systemUsers", firebaseUser.uid);
+        let userDocSnapshot = await getDoc(userDocRef);
+        
+        if (!userDocSnapshot.exists() && (firebaseUser.email === "admin@ehonor.dki.go.id" || firebaseUser.email === "user@ehonor.dki.go.id")) {
+          // Wait for bootstrap setDoc to finish
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          userDocSnapshot = await getDoc(userDocRef);
+        }
+
+        if (userDocSnapshot.exists()) {
+          const data = userDocSnapshot.data();
+          setUserRole(data.role);
+          
+          // Emergency fix: Ensure the bootstrap admin always has the correct role
+          if (firebaseUser.email === "admin@ehonor.dki.go.id" && data.role !== "Super Admin") {
+            await updateDoc(userDocRef, { role: "Super Admin" });
+            setUserRole("Super Admin");
+          }
         } else {
           // Default role if not found
           setUserRole("Karyawan");
@@ -237,6 +252,13 @@ function Dashboard({ onLogout, username, role, userId }: { onLogout: () => void,
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string, type: 'success' | 'info' | 'error' } | null>(null);
+
+  // Sync active tab if role changes significantly (e.g. login finished late)
+  useEffect(() => {
+    if (role === "Super Admin" && activeTab === "performance") {
+      setActiveTab("dashboard");
+    }
+  }, [role]);
 
   // Firestore States
   const [employees, setEmployees] = useState<any[]>([]);
