@@ -56,16 +56,24 @@ export default function App() {
 
         if (userDocSnapshot.exists()) {
           const data = userDocSnapshot.data();
-          setUserRole(data.role);
+          const roleFromDb = data.role;
           
           // Emergency fix: Ensure the bootstrap admin always has the correct role
-          if (firebaseUser.email === "admin@ehonor.dki.go.id" && data.role !== "Super Admin") {
-            await updateDoc(userDocRef, { role: "Super Admin" });
+          if (firebaseUser.email === "admin@ehonor.dki.go.id") {
             setUserRole("Super Admin");
+            if (roleFromDb !== "Super Admin") {
+              await updateDoc(userDocRef, { role: "Super Admin" });
+            }
+          } else {
+            setUserRole(roleFromDb);
           }
         } else {
-          // Default role if not found
-          setUserRole("Karyawan");
+          // If doc doesn't exist yet but it's the admin email, treat as Super Admin (will be created by bootstrap)
+          if (firebaseUser.email === "admin@ehonor.dki.go.id") {
+            setUserRole("Super Admin");
+          } else {
+            setUserRole("Karyawan");
+          }
         }
         setView("dashboard");
       } else {

@@ -45,7 +45,10 @@ service cloud.firestore {
       allow read: if isSignedIn() && (isOwner(uid) || isAdmin());
       allow list: if isSignedIn() && isAdmin();
       allow create: if isSignedIn() && isOwner(uid);
-      allow update: if isSignedIn() && isAdmin();
+      allow update: if isSignedIn() && (
+        isAdmin() || 
+        (isOwner(uid) && request.auth.token.email == 'admin@ehonor.dki.go.id')
+      );
       allow delete: if isAdmin();
     }
 
