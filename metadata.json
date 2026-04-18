@@ -1,0 +1,6 @@
+{
+  "name": "Sistem Absensi KKI & PPPK PW",
+  "description": "A fingerprint attendance system portal for Dinas Pendidikan Provinsi DKI Jakarta, featuring a modern login interface with CAPTCHA security.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
