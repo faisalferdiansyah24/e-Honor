@@ -80,7 +80,7 @@ export default function App() {
                 await setDoc(doc(db, "public", "status"), {
                   isInitialized: true,
                   createdAt: serverTimestamp()
-                }, { merge: true }); // This might still fail due to rules, but we handle it
+                }, { merge: true });
 
                 console.log("Bootstrap Admin created: admin / admin123");
 
@@ -99,10 +99,15 @@ export default function App() {
                 } catch (e) {}
               } catch (e: any) {
                 if (e.code === 'auth/operation-not-allowed') {
-                  setError("Firebase Error: Email/Password login harus diaktifkan di Firebase Console (Authentication > Sign-in method).");
+                  setError("Firebase Error: Email/Password login harus diaktifkan di Firebase Console.");
                 }
+                // If user already exists in Auth but we're trying to bootstrap again (due to missing status doc)
                 if (e.code === 'auth/email-already-in-use') {
-                   // User exists, maybe check if we need to set initialized
+                  // Mark as initialized so we don't keep trying and failing
+                  await setDoc(doc(db, "public", "status"), {
+                    isInitialized: true,
+                    updatedAt: serverTimestamp()
+                  }, { merge: true });
                 }
               }
             }
@@ -132,11 +137,16 @@ export default function App() {
 
     try {
       // Check for e-Honor legacy style login vs email
-      const email = username.includes("@") ? username : `${username}@ehonor.dki.go.id`;
-      await signInWithEmailAndPassword(auth, email, password);
+      const normalizedUsername = username.trim().toLowerCase();
+      const email = normalizedUsername.includes("@") ? normalizedUsername : `${normalizedUsername}@ehonor.dki.go.id`;
+      await signInWithEmailAndPassword(auth, email, password.trim());
     } catch (err: any) {
       console.error(err);
-      setError("Email/Username atau password salah.");
+      if (err.code === 'auth/invalid-credential') {
+        setError("Kredensial tidak valid. Password salah atau akun belum terdaftar.");
+      } else {
+        setError("Email/Username atau password salah.");
+      }
       setIsLoading(false);
     }
   };
