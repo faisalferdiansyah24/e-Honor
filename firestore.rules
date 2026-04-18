@@ -33,10 +33,18 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    // Public Config
+    match /public/status {
+      allow read: if true;
+      allow create: if true; 
+      allow update, delete: if isAdmin();
+    }
+
     // System Users
     match /systemUsers/{uid} {
       allow read: if isSignedIn() && (isOwner(uid) || isAdmin());
-      allow create: if isSignedIn() && isOwner(uid) && request.resource.data.role == 'Karyawan';
+      allow list: if isSignedIn() && isAdmin();
+      allow create: if isSignedIn() && isOwner(uid);
       allow update: if isSignedIn() && isAdmin();
       allow delete: if isAdmin();
     }

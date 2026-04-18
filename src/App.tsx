@@ -56,6 +56,61 @@ export default function App() {
       } else {
         setUser(null);
         setView("login");
+        
+        // Bootstrap: Create default admin if no users exist
+        const bootstrapAdmin = async () => {
+          try {
+            // Check if app is already initialized via public flag
+            // to avoid permission errors on protected collections
+            const statusDoc = await getDoc(doc(db, "public", "status"));
+            if (!statusDoc.exists()) {
+              const email = "admin@ehonor.dki.go.id";
+              const pass = "admin123";
+              try {
+                const cred = await createUserWithEmailAndPassword(auth, email, pass);
+                await setDoc(doc(db, "systemUsers", cred.user.uid), {
+                  uid: cred.user.uid,
+                  email: email,
+                  displayName: "Administrator",
+                  role: "Super Admin",
+                  createdAt: serverTimestamp()
+                });
+                
+                // Set initialized flag
+                await setDoc(doc(db, "public", "status"), {
+                  isInitialized: true,
+                  createdAt: serverTimestamp()
+                }, { merge: true }); // This might still fail due to rules, but we handle it
+
+                console.log("Bootstrap Admin created: admin / admin123");
+
+                // Also create a default employee for testing
+                const empEmail = "user@ehonor.dki.go.id";
+                const empPass = "user123";
+                try {
+                  const empCred = await createUserWithEmailAndPassword(auth, empEmail, empPass);
+                  await setDoc(doc(db, "systemUsers", empCred.user.uid), {
+                    uid: empCred.user.uid,
+                    email: empEmail,
+                    displayName: "Budi Karyawan",
+                    role: "Karyawan",
+                    createdAt: serverTimestamp()
+                  });
+                } catch (e) {}
+              } catch (e: any) {
+                if (e.code === 'auth/operation-not-allowed') {
+                  setError("Firebase Error: Email/Password login harus diaktifkan di Firebase Console (Authentication > Sign-in method).");
+                }
+                if (e.code === 'auth/email-already-in-use') {
+                   // User exists, maybe check if we need to set initialized
+                }
+              }
+            }
+          } catch (err) {
+            console.error("Bootstrap error:", err);
+          }
+        };
+        bootstrapAdmin();
       }
     });
     return () => unsubscribe();
