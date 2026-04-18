@@ -18,11 +18,15 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isSignedIn() && getUserData().role == 'Super Admin';
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/systemUsers/$(request.auth.uid)) && 
+             getUserData().role == 'Super Admin';
     }
 
     function isOperator() {
-      return isSignedIn() && (getUserData().role == 'Super Admin' || getUserData().role == 'Operator');
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/systemUsers/$(request.auth.uid)) && 
+             (getUserData().role == 'Super Admin' || getUserData().role == 'Operator');
     }
 
     function isOwner(userId) {

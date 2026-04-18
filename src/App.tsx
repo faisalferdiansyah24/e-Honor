@@ -275,17 +275,23 @@ function Dashboard({ onLogout, username, role, userId }: { onLogout: () => void,
   const [systemUsers, setSystemUsers] = useState<any[]>([]);
 
   useEffect(() => {
-    // Real-time Employees
-    const qEmployees = query(collection(db, "employees"), orderBy("name", "asc"));
-    const unsubEmployees = onSnapshot(qEmployees, (snapshot) => {
-      setEmployees(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
+    // Real-time Employees (Admin/Operator only)
+    let unsubEmployees = () => {};
+    if (role === "Super Admin" || role === "Operator") {
+      const qEmployees = query(collection(db, "employees"), orderBy("name", "asc"));
+      unsubEmployees = onSnapshot(qEmployees, (snapshot) => {
+        setEmployees(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      }, (err) => console.warn("Employees listener permission denied", err));
+    }
 
-    // Real-time Attendance
-    const qAttendance = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
-    const unsubAttendance = onSnapshot(qAttendance, (snapshot) => {
-      setAttendanceLogs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
+    // Real-time Attendance (Admin/Operator only)
+    let unsubAttendance = () => {};
+    if (role === "Super Admin" || role === "Operator") {
+      const qAttendance = query(collection(db, "attendance"), orderBy("timestamp", "desc"));
+      unsubAttendance = onSnapshot(qAttendance, (snapshot) => {
+        setAttendanceLogs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      }, (err) => console.warn("Attendance listener permission denied", err));
+    }
 
     // Real-time Performance (Role-based)
     let qPerformance;
@@ -296,7 +302,7 @@ function Dashboard({ onLogout, username, role, userId }: { onLogout: () => void,
     }
     const unsubPerformance = onSnapshot(qPerformance, (snapshot) => {
       setPerformanceData(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    });
+    }, (err) => console.warn("Performance listener permission denied", err));
 
     // Real-time System Users (Admin only)
     let unsubUsers = () => {};
@@ -304,7 +310,7 @@ function Dashboard({ onLogout, username, role, userId }: { onLogout: () => void,
       const qUsers = query(collection(db, "systemUsers"), orderBy("role", "asc"));
       unsubUsers = onSnapshot(qUsers, (snapshot) => {
         setSystemUsers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-      });
+      }, (err) => console.warn("Users listener permission denied", err));
     }
 
     return () => {
